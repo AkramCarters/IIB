@@ -1,0 +1,338 @@
+--*****************************************************
+--*$MQSI_SubVersion URL = $URL: http://scc.carters.com:9999/svn/ace_rep/PRD/InterfaceFlows/MFA_PriceBook/carters/pip/dmw/Pricebook_DMW.esql $ MQSI$
+--*$MQSI_SubVersion Commit Id = $Id: Pricebook_DMW.esql 2242 2020-07-06 06:42:32Z trivedp $ MQSI$
+--*$MQSI_SubVersion Revision Number= $Revision: 2242 $ MQSI$
+--*$MQSI_VERSION=$Revision: 2242 $MQSI$
+--*$MQSI_SubVersion Last Modified By = $Author: trivedp $ MQSI$
+--*$MQSI_SubVersion Last Modified On = $Date: 2020-07-06 02:42:32 -0400 (Mon, 06 Jul 2020) $ MQSI$
+--*****************************************************
+
+BROKER SCHEMA carters.pip.dmw
+PATH carters.common.util;
+
+DECLARE myCounter SHARED INTEGER 0;
+DECLARE loadCounter SHARED INTEGER 3000;
+DECLARE ns3 NAMESPACE 'http://www.demandware.com/xml/impex/pricebook/2006-10-31';
+DECLARE ns1 NAMESPACE 'http://www.w3.org/XML/1998/namespace';
+
+CREATE COMPUTE MODULE Pricebook_DMW_Call_SP
+	CREATE FUNCTION Main() RETURNS BOOLEAN
+	BEGIN
+		-- CALL CopyMessageHeaders();
+		-- CALL CopyEntireMessage();
+		CALL MSRP_STG('03');
+		
+	RETURN TRUE;
+	END;
+	
+	CREATE PROCEDURE CopyMessageHeaders() BEGIN
+		DECLARE I INTEGER 1;
+		DECLARE J INTEGER;
+		SET J = CARDINALITY(InputRoot.*[]);
+		WHILE I < J DO
+			SET OutputRoot.*[I] = InputRoot.*[I];
+			SET I = I + 1;
+		END WHILE;
+	END;
+
+	CREATE PROCEDURE CopyEntireMessage() BEGIN
+		SET OutputRoot = InputRoot;
+	END;
+END MODULE;
+
+CREATE COMPUTE MODULE Pricebook_DMW_BuildFeed
+	CREATE FUNCTION Main() RETURNS BOOLEAN
+	BEGIN
+		-- CALL CopyMessageHeaders();
+		-- CALL CopyEntireMessage();
+		CREATE FIELD Environment.Variables;
+		DECLARE env REFERENCE TO Environment.Variables;
+		DECLARE querystring,checkcounter CHAR;
+		SET env.ResultSet = 'START';
+		
+		--SET checkcounter = 'select min(row_num) as min_row_num from staging_msrp order by row_num';
+		SET checkcounter = 'select max(row_num) as max_row_num from esb.staging_msrp order by row_num';							
+		SET env.CheckRowNum = PASSTHRU(checkcounter);
+		--SET env.CheckRowNum.MIN_ROW_NUM = 5000;
+		--WHILE (env.ResultSet IS NOT NULL) DO
+			
+			SET querystring = 'select S.ROW_NUM,S.UPC_CODE,S.MSRP_PRICE from ESB.STAGING_MSRP S where S.ROW_NUM <= ?';
+			
+				
+			--SET env.CheckRowNum.MIN_ROW_NUM = env.CheckRowNum.MIN_ROW_NUM + loadCounter;
+			
+			--SET env.ResultSet = PASSTHRU(querystring to Database.PIP VALUES (env.CheckRowNum.MIN_ROW_NUM));
+			SET env.ResultSet = PASSTHRU(querystring,env.CheckRowNum.MAX_ROW_NUM);		
+			
+			SET OutputLocalEnvironment.Destination.File.Name = 'Pricebook_'||CAST(CURRENT_TIMESTAMP AS CHARACTER FORMAT 'yyyy-MM-dd_HH-mm-ss-SSS')||'.xml' ;
+			 
+			CALL BuildPriceBook();
+			--PROPAGATE;
+		--END WHILE;
+		SET Environment.Monitoring.EventCorrelation.parentTransactionId = OutputLocalEnvironment.Destination.File.Name;
+		IF(env.ResultSet IS NULL) THEN
+			PROPAGATE TO TERMINAL 'out1';
+		END IF;
+		SET Environment.Variables = NULL;
+		RETURN FALSE;
+	END;
+	
+	CREATE PROCEDURE BuildPriceBook() BEGIN
+		CREATE FIELD OutputRoot.XMLNSC;
+		
+		DECLARE priceOut REFERENCE TO OutputRoot.XMLNSC;
+		DECLARE priceRef REFERENCE TO priceOut;
+		
+		DECLARE env REFERENCE TO Environment.Variables;
+		
+		DECLARE PrcBookRef REFERENCE TO InputRoot;
+		DECLARE msrpRef REFERENCE TO env;
+		DECLARE priceTblRef REFERENCE TO env;
+		
+		CREATE FIRSTCHILD OF OutputRoot.XMLNSC TYPE XMLNSC.XmlDeclaration; 
+		SET OutputRoot.XMLNSC.(XMLNSC.XmlDeclaration)*.(XMLNSC.Attribute)Version = '1.0'; 
+		SET OutputRoot.XMLNSC.(XMLNSC.XmlDeclaration)*.(XMLNSC.Attribute)Encoding = 'UTF-8'; 
+		SET OutputRoot.XMLNSC.(XMLNSC.XmlDeclaration)*.(XMLNSC.Attribute)StandAlone = 'yes'; 		
+		
+		
+		SET OutputRoot.XMLNSC.ns3:pricebooks.(XMLNSC.NamespaceDecl)xmlns = ns3;
+		
+		
+		SET OutputRoot.XMLNSC.ns3:pricebooks.ns3:pricebook.ns3:header.(XMLNSC.Attribute)"pricebook-id" = 'CARTERS-REGULAR';
+		SET OutputRoot.XMLNSC.ns3:pricebooks.ns3:pricebook.ns3:header.ns3:currency = 'USD';
+		SET OutputRoot.XMLNSC.ns3:pricebooks.ns3:pricebook.ns3:header.ns3:"display-name".(XMLNSC.Attribute)ns1:lang = 'default';
+		SET OutputRoot.XMLNSC.ns3:pricebooks.ns3:pricebook.ns3:header.ns3:"display-name" = 'CARTERS-REGULAR';
+		SET OutputRoot.XMLNSC.ns3:pricebooks.ns3:pricebook.ns3:header.ns3:description.(XMLNSC.Attribute)ns1:lang = 'default';
+		SET OutputRoot.XMLNSC.ns3:pricebooks.ns3:pricebook.ns3:header.ns3:description = 'The default price book for CARTERS';
+		SET OutputRoot.XMLNSC.ns3:pricebooks.ns3:pricebook.ns3:header.ns3:"online-flag" = 'true';
+		
+		CREATE LASTCHILD OF priceOut.ns3:pricebooks.ns3:pricebook AS priceRef NAMESPACE ns3 NAME 'price-tables';
+				
+		FOR msrpRef AS env.ResultSet[] DO
+			
+			IF(CAST(FIELDVALUE(msrpRef.MSRP_PRICE) AS INT) <> 0 AND msrpRef.MSRP_PRICE IS NOT NULL) THEN
+				
+				CREATE LASTCHILD OF priceRef AS priceTblRef NAMESPACE ns3 NAME 'price-table';
+				SET priceTblRef.(XMLNSC.Attribute)"product-id" = msrpRef.UPC_CODE;
+							
+				SET priceTblRef.(XMLNSC.Field)ns3:amount.(XMLNSC.Attribute)quantity='1';
+				SET priceTblRef.(XMLNSC.Field)ns3:amount VALUE= msrpRef.MSRP_PRICE;
+			END IF;
+			
+			
+		END FOR;
+		PROPAGATE;
+		SET env.ResultSet = NULL;
+	END;
+	
+	CREATE PROCEDURE CopyMessageHeaders() BEGIN
+		DECLARE I INTEGER 1;
+		DECLARE J INTEGER;
+		SET J = CARDINALITY(InputRoot.*[]);
+		WHILE I < J DO
+			SET OutputRoot.*[I] = InputRoot.*[I];
+			SET I = I + 1;
+		END WHILE;
+	END;
+
+	CREATE PROCEDURE CopyEntireMessage() BEGIN
+		SET OutputRoot = InputRoot;
+	END;
+END MODULE;
+
+CREATE COMPUTE MODULE Pricebook_DMW_DailyJob
+	CREATE FUNCTION Main() RETURNS BOOLEAN
+	BEGIN
+	declare nexthour_c character;
+	declare nexthour_i integer;
+    declare nexthour_t time;
+    declare nextday_d date;
+    CALL CopyEntireMessage_and_Environment();
+    
+    -- grab just the hour out of the current time ...
+    set nexthour_c = cast(CURRENT_TIME as character format 'HH');
+	set nexthour_i = cast(nexthour_c as integer);
+	-- set the timer for the next hour ....
+	set nexthour_i = nexthour_i + 1;
+	-- if its already after 11pm, we have to bump the date as well.
+	if (nexthour_i > 23) then
+		-- select midnight
+		set nexthour_i = 0;
+		-- select tomorrow's date
+		set nextday_d = cast(InputLocalEnvironment.TimeoutRequest.StartDate as date);
+		set nextday_d = nextday_d + INTERVAL '1' day;
+		set OutputLocalEnvironment.TimeoutRequest.StartDate = nextday_d;
+	end if;
+	
+	
+	set nexthour_t = cast(nexthour_i, 0, 5 as time);
+	
+	begin atomic
+           set OutputLocalEnvironment.TimeoutRequest.Identifier =
+	       'TimeReq' || cast (myCounter as character) || SQL.ExecutionGroupLabel;
+           set myCounter = myCounter + 1;
+    end;
+	set OutputLocalEnvironment.TimeoutRequest.StartTime = cast(nexthour_t as time);
+	set OutputLocalEnvironment.TimeoutRequest.Action = 'SET';
+	-- for once
+	set OutputLocalEnvironment.TimeoutRequest.Count = 1;
+	-- 10 mins past the hour
+    set OutputLocalEnvironment.TimeoutRequest.Interval = 600;
+    set OutputLocalEnvironment.TimeoutRequest.AllowOverwrite = TRUE;
+    
+--    if (nexthour_i > 3) then
+--			RETURN FALSE;
+--		else
+--			RETURN TRUE;
+--	end if;
+	
+	
+	END;
+
+	CREATE PROCEDURE CopyEntireMessage_and_Environment() BEGIN
+		SET OutputRoot = InputRoot;
+		SET OutputLocalEnvironment = InputLocalEnvironment;
+	END;
+
+	CREATE PROCEDURE CopyMessageHeaders() BEGIN
+		DECLARE I INTEGER 1;
+		DECLARE J INTEGER;
+		SET J = CARDINALITY(InputRoot.*[]);
+		WHILE I < J DO
+			SET OutputRoot.*[I] = InputRoot.*[I];
+			SET I = I + 1;
+		END WHILE;
+	END;
+
+	CREATE PROCEDURE CopyEntireMessage() BEGIN
+		SET OutputRoot = InputRoot;
+	END;
+END MODULE;
+
+CREATE COMPUTE MODULE Pricebook_DMW_ForCanada
+	CREATE FUNCTION Main() RETURNS BOOLEAN
+	BEGIN
+		-- CALL CopyMessageHeaders();
+		
+		CALL MSRP_STG('04');
+		PROPAGATE TO TERMINAL 'out1';
+		CALL CopyEntireMessage();
+		SET OutputRoot.MQMD.Expiry = CURRENT_GMTTIMESTAMP + INTERVAL '6' DAY;
+		SET OutputLocalEnvironment.Destination.MQ.DestinationData.queueName = 'EXCEPTION.HANDLER.OUTPUT.QUEUE';
+		SET Environment.Variables = NULL;
+		RETURN TRUE;
+	END;
+
+	CREATE PROCEDURE CopyMessageHeaders() BEGIN
+		DECLARE I INTEGER 1;
+		DECLARE J INTEGER;
+		SET J = CARDINALITY(InputRoot.*[]);
+		WHILE I < J DO
+			SET OutputRoot.*[I] = InputRoot.*[I];
+			SET I = I + 1;
+		END WHILE;
+	END;
+
+	CREATE PROCEDURE CopyEntireMessage() BEGIN
+		SET OutputRoot = InputRoot;
+	END;
+END MODULE;
+
+CREATE COMPUTE MODULE Pricebook_DMW_BuildCAFeed
+	CREATE FUNCTION Main() RETURNS BOOLEAN
+	BEGIN
+		-- CALL CopyMessageHeaders();
+		-- CALL CopyEntireMessage();
+		CREATE FIELD Environment.Variables;
+		DECLARE env REFERENCE TO Environment.Variables;
+		DECLARE querystring,checkcounter CHAR;
+		SET env.ResultSet = 'START';
+		
+		--SET checkcounter = 'select min(row_num) as min_row_num from staging_msrp order by row_num';
+		SET checkcounter = 'select max(row_num) as max_row_num from esb.staging_msrp order by row_num';							
+		SET env.CheckRowNum = PASSTHRU(checkcounter);
+		--SET env.CheckRowNum.MIN_ROW_NUM = 5000;
+		--WHILE (env.ResultSet IS NOT NULL) DO
+			
+			SET querystring = 'select S.ROW_NUM,S.UPC_CODE,S.MSRP_PRICE from ESB.STAGING_MSRP S where S.ROW_NUM <= ?';
+			
+				
+			--SET env.CheckRowNum.MIN_ROW_NUM = env.CheckRowNum.MIN_ROW_NUM + loadCounter;
+			
+			--SET env.ResultSet = PASSTHRU(querystring to Database.PIP VALUES (env.CheckRowNum.MIN_ROW_NUM));
+			SET env.ResultSet = PASSTHRU(querystring,env.CheckRowNum.MAX_ROW_NUM);		
+			
+			SET OutputLocalEnvironment.Destination.File.Name = 'Pricebook_'||CAST(CURRENT_TIMESTAMP AS CHARACTER FORMAT 'yyyy-MM-dd_HH-mm-ss-SSS')||'.xml' ;
+			 
+			CALL BuildPriceBookCA();
+			--PROPAGATE;
+		--END WHILE;
+		SET Environment.Monitoring.EventCorrelation.parentTransactionId = OutputLocalEnvironment.Destination.File.Name;
+		IF(env.ResultSet IS NULL) THEN
+			PROPAGATE TO TERMINAL 'out1';
+		END IF;
+		SET Environment.Variables = NULL;
+		RETURN FALSE;
+	END;
+	
+	CREATE PROCEDURE BuildPriceBookCA() BEGIN
+		CREATE FIELD OutputRoot.XMLNSC;
+		
+		DECLARE priceOut REFERENCE TO OutputRoot.XMLNSC;
+		DECLARE priceRef REFERENCE TO priceOut;
+		
+		DECLARE env REFERENCE TO Environment.Variables;
+		
+		DECLARE PrcBookRef REFERENCE TO InputRoot;
+		DECLARE msrpRef REFERENCE TO env;
+		DECLARE priceTblRef REFERENCE TO env;
+		
+		CREATE FIRSTCHILD OF OutputRoot.XMLNSC TYPE XMLNSC.XmlDeclaration; 
+		SET OutputRoot.XMLNSC.(XMLNSC.XmlDeclaration)*.(XMLNSC.Attribute)Version = '1.0'; 
+		SET OutputRoot.XMLNSC.(XMLNSC.XmlDeclaration)*.(XMLNSC.Attribute)Encoding = 'UTF-8'; 
+		SET OutputRoot.XMLNSC.(XMLNSC.XmlDeclaration)*.(XMLNSC.Attribute)StandAlone = 'yes'; 		
+		
+		
+		SET OutputRoot.XMLNSC.ns3:pricebooks.(XMLNSC.NamespaceDecl)xmlns = ns3;
+		
+		
+		SET OutputRoot.XMLNSC.ns3:pricebooks.ns3:pricebook.ns3:header.(XMLNSC.Attribute)"pricebook-id" = 'CARTERS-CA-REGULAR';
+		SET OutputRoot.XMLNSC.ns3:pricebooks.ns3:pricebook.ns3:header.ns3:currency = 'CAD';
+		SET OutputRoot.XMLNSC.ns3:pricebooks.ns3:pricebook.ns3:header.ns3:"display-name".(XMLNSC.Attribute)ns1:lang = 'default';
+		SET OutputRoot.XMLNSC.ns3:pricebooks.ns3:pricebook.ns3:header.ns3:"display-name" = 'CARTERS-CA-REGULAR';
+		SET OutputRoot.XMLNSC.ns3:pricebooks.ns3:pricebook.ns3:header.ns3:description.(XMLNSC.Attribute)ns1:lang = 'default';
+		SET OutputRoot.XMLNSC.ns3:pricebooks.ns3:pricebook.ns3:header.ns3:description = 'The default price book for CARTERS CA';
+		SET OutputRoot.XMLNSC.ns3:pricebooks.ns3:pricebook.ns3:header.ns3:"online-flag" = 'true';
+		
+		CREATE LASTCHILD OF priceOut.ns3:pricebooks.ns3:pricebook AS priceRef NAMESPACE ns3 NAME 'price-tables';
+		
+		FOR msrpRef AS env.ResultSet[] DO			
+			IF(msrpRef.MSRP_PRICE IS NOT NULL AND CAST(FIELDVALUE(msrpRef.MSRP_PRICE) AS INT) <> 0) THEN
+				CREATE LASTCHILD OF priceRef AS priceTblRef NAMESPACE ns3 NAME 'price-table';
+				SET priceTblRef.(XMLNSC.Attribute)"product-id" = TRIM(REPLACE(msrpRef.UPC_CODE, '_CA', ' '));
+				--SET priceTblRef.(XMLNSC.Attribute)"product-id" = msrpRef.UPC_CODE;				
+				--<NS1:amount quantity="1">24.000000</NS1:amount>			
+				SET priceTblRef.(XMLNSC.Field)ns3:amount.(XMLNSC.Attribute)quantity='1';
+				SET priceTblRef.(XMLNSC.Field)ns3:amount VALUE= COALESCE(msrpRef.MSRP_PRICE,'0.00');
+			END IF;
+		
+		END FOR;
+		PROPAGATE;
+		SET env.ResultSet = NULL;
+	END;
+	
+	CREATE PROCEDURE CopyMessageHeaders() BEGIN
+		DECLARE I INTEGER 1;
+		DECLARE J INTEGER;
+		SET J = CARDINALITY(InputRoot.*[]);
+		WHILE I < J DO
+			SET OutputRoot.*[I] = InputRoot.*[I];
+			SET I = I + 1;
+		END WHILE;
+	END;
+
+	CREATE PROCEDURE CopyEntireMessage() BEGIN
+		SET OutputRoot = InputRoot;
+	END;
+END MODULE;
+
